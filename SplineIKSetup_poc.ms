@@ -3,53 +3,69 @@ global BS_SPIRITTOOLS_GENERAL = @"C:\spirittools\spirit-tools\General_Tools\"
 filein (BS_SPIRITTOOLS_GENERAL + @"setup\_functions\ReturnCode\ReturnCode.ms")
 
 
--- Hop debut d'un code plus robuste que le Spline HD MD LD
+-- Hop debut d'un code plus robuste que le Spline HD MD LD, 
+-- sans limites, pense de maniere recursive
 -----------------------------------------------------------
--- Initial Spline IK Setup Layer
-struct InitialSpIKSetupLayer
-(
-
-
-	on create do ()
-)
-
-
 
 
 struct SpIKSetupLayer 
 (
-	_previousSpline,
-	_spline,
-	_controllers,
-	_helpers,
+	-- Introspection
+	_parentLayer = undefined, -- parent SplineIkSetupLayer layer
+
+	-- origSPline
+	_origSpline = undefined,
+
+	-- Objects for this layer
+	_spline,                  -- the spline constituting this layer
+	_controllers,             -- the ctrls animating this layer
+	_helpers,                 -- the helpers driving this.ctrls, constrained to ._parentLayer._spline
+	
+	-- Options for the layer
+	_divisions  = 1,
 	_layerIndex = 10,
 	_layerName = "slay",
 	_layerColor = (color 255 0 0),
-	_divisions  = 1,
 
-	fn divideSpline = (
+	-- old expr, get rid of
+	_previousSpline,
+
+
+	isLeaf    = false, -- is this layer a leaf (end layer)
+	isInitial = false, -- is this layer an initial one 
+
+
+	fn _isSplineValid s:undefined = 
+	(
+		if s == undefined then s = this._spline
+		(ReturnCode.new (superclassof s == shape) err_reason:"Invalid spline!" ok_reason:"Valid spline!")
+	),
+
+	fn divideSpline = 
+	(
 		for s=1 to (numSplines this._spline) do ( -- loop over each spline
 			local numD = (numSegments this._previousSpline s) * (this._divisions + 1)
 			subdivideSegment this._spline s 1 (numD-1)
 		)
 	),
 
-
-
-	fn initSplineIkModifier = (
+	fn initSplineIkModifier = 
+	(
 		local spikMod = Spline_IK_Control()
 		spikMod.linkTypes = 2
 		addModifier this._spline (spikMod)
 	),
 
-	fn createControllers = (
+	fn createControllers = 
+	(
 		this._spline.modifiers[1].createHelper (numknots this._spline 1)
 		this._spline.modifiers[1].helper_size = (this._layerIndex * 10) - (this._layerIndex * 5)
 		this._controllers = this._spline.modifiers[1].helper_list
 	),
 
 
-	fn createHelpers = (
+	fn createHelpers = 
+	(
 		-- Process controllers
 		for z=1 to this._controllers.count do (
 			
@@ -89,16 +105,17 @@ struct SpIKSetupLayer
 )
 
 
+
 struct SplineIkSetupCore 
 (
-
-
 	layerNames  = #(#ld, #md, #hd, #uhd, #uuhd, #uuuhd, #uuuuhd),
 	layerColors = #((color 255 0 0), (color 255 255 0), (color 224 125 0), (color 224 192 160), (color 224 192 160), (color 224 192 255)),
 
 	layerSplines = undefined,
 	splineLayers = undefined,
 
+
+	_layers = undefined,
 
 	--- BASESPLINE
 	baseSpline = undefined,
@@ -154,33 +171,25 @@ struct SplineIkSetupCore
 			-- Get new layer infos
 			local layName = this.layerNames[i] as string
 			if /*(stf.isMax2018())*/ true then (layName = tolower layName)
-			local layColor = this.layerColors[i]
-
-			-- orignal spline
-			local origSpline = this.layerSplines[1]
-			local origSplineName = origSpline.name
-
-			-- Get previous layer infos
-			local previousSplineName = this.layerNames[i-1]
-			local previousSpline     = this.layerSplines[i-1]
+			local layColor = this.layerColors[i]  
 
 			-- Make new spline out of the previous one
-			local newSpline = copy origSpline
-			newSpline.name = stf.substitutestring previousSpline.name previousSplineName layName
+			local newSpline = copy this._layers[i-1]._origSpline
+			newSpline.name = stf.substitutestring this._layers[i-1]._spline.name this.layerNames[i-1] layName
 			newSpline.wirecolor = layColor
 
-
-
-
-			-- Store the new spline layer
-			local sikLayer = (SpIKSetupLayer _divisions:this.layerDivisions _layerColor:layColor _layerName:layName _layerIndex:(i) _spline:newSpline _previousSpline:previousSpline _helpers:#())
+			-- Create the new spline layer
+			local sikLayer = (SpIKSetupLayer \
+										_origSpline:this._layers[i-1]._origSpline \
+										_divisions:this.layerDivisions \
+										_layerColor:layColor \
+										_layerName:layName \
+										_layerIndex:(i) \
+										_spline:newSpline \
+										_previousSpline:this._layers[i-1]._spline \
+										_helpers:#())
 
 			-- Subdivide spline based on previous one
-			-- Subdivide each segment of the copied spline by this.layerDivisions
-			/*for s=1 to (numSplines newSpline) do ( -- loop over each spline
-				local numD = (numSegments previousSpline s) * (this.layerDivisions + 1)
-				subdivideSegment newSpline s 1 (numD-1)
-			)*/
 			sikLayer.divideSpline()
 
 			-- init spline_ik_control mod
@@ -192,10 +201,8 @@ struct SplineIkSetupCore
 			-- Process controllers
 			sikLayer.createHelpers()
 
-
-			append this.layerSplines newSpline
-			append this.splineLayers sikLayer
-			--spikMod.createHelper (spikMod.getKnotCount())
+			-- Store the layer
+			append this._layers sikLayer
 		)
 	),
 
@@ -236,12 +243,26 @@ struct SplineIkSetupCore
 					-- do last objects inits
 					this.layerSplines = #(this.baseSpline)
 					this.splineLayers = #(SpIKSetupLayer _spline:this.baseSpline _helpers:#())
+
+
+					-- Init the _layers with an initial one based on the userspline
+					this._layers = #(
+						(
+							SpIKSetupLayer _divisions:this.layerDivisions \
+						 				   _layerColor:layColor \
+						 				   _layerName:layName \
+						 				   _layerIndex:(i) \
+						 				   _spline:s \
+						 				   _previousSpline:s \
+						 				   _helpers:#() \
+						 				   _origSpline:s
+						 )
+					)
 				)
 			)
 		)
 		ret
 	),
-
 
 
 
@@ -255,90 +276,10 @@ struct SplineIkSetupCore
 	)
 )
 
-/*sisc = SplineIkSetupCore()
-retinit = sisc.init $Line001 layersCount:3 layerDivisions:1
+sisc = SplineIkSetupCore()
+retinit = sisc.init $Line001 layersCount:4 layerDivisions:2
 if retinit.ret then (
 	sisc.rig()
 )else(
 	retinit
-)*/
-
-
-
-
-struct InitialSplineIkSetupLayer 
-(
-	-- Introspection
-	_parentLayer = undefined, -- parent SplineIkSetupLayer layer
-
-	-- Objects for this layer
-	_spline,                  -- the spline constituting this layer
-	_controllers,             -- the ctrls animating this layer
-	_helpers,                 -- the helpers driving this.ctrls, constrained to ._parentLayer._spline
-	
-	-- Options for the layer
-	_divisions  = 1,
-	_layerIndex = 10,
-	_layerName = "slay",
-	_layerColor = (color 255 0 0),
-
-	on create do ()
 )
-
-
-
-struct SplineIkSetupLayer 
-(
-	-- Introspection
-	_parentLayer = undefined, -- parent SplineIkSetupLayer layer
-
-	-- Objects for this layer
-	_spline,                  -- the spline constituting this layer
-	_controllers,             -- the ctrls animating this layer
-	_helpers,                 -- the helpers driving this.ctrls, constrained to ._parentLayer._spline
-	
-	-- Options for the layer
-	_divisions  = 1,
-	_layerIndex = 10,
-	_layerName = "slay",
-	_layerColor = (color 255 0 0),
-
-	on create do ()
-)
-
-
-struct SplineIkSetupLayerDef
-(
-	name,
-	divisions,
-	children,
-
-
-	fn process = 
-	(
-		-- Recursive process
-		for c in this.children do (
-			c.process()
-		)
-
-		-- init self
-		format "Processing..%\n" this.name
-	),
-
-	fn __initArray a = (if (classof a) != array then (a = #())),
-
-	on create do (
-		this.__initArray this.children
-	)
-)
-
-m = SplineIkSetupLayerDef name:"A1" divisions:1 children:#(
-		(SplineIkSetupLayerDef name:"A2" divisions:1 children:#(
-			(SplineIkSetupLayerDef name:"A3" divisions:1 children:#(
-					(SplineIkSetupLayerDef name:"A3" divisions:1 children:#())
-				)
-			)
-		)
-	)
-)
-m.process()
